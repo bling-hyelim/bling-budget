@@ -11,7 +11,8 @@ import {
   updateTransaction,
   deleteTransaction,
 } from "@/app/actions";
-import { getAccountRole, type AccountRow, type CategoryTreeNode } from "@/lib/data";
+import type { AccountRow, CategoryTreeNode } from "@/lib/data";
+import { getAccountRole } from "@/lib/accountRole";
 
 type TxType = "income" | "expense" | "transfer";
 type TxMode = "income" | "expense" | "transfer" | "savings";

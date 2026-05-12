@@ -9,6 +9,10 @@
 import "server-only";
 import { createClient } from "@/lib/supabase/server";
 import * as mock from "@/lib/mockData";
+import { getAccountRole as _getAccountRole, type AccountRole } from "@/lib/accountRole";
+
+export { type AccountRole };
+export const getAccountRole = _getAccountRole;
 
 /* ---------------- 타입 ---------------- */
 
@@ -20,34 +24,6 @@ export type TxType = "income" | "expense" | "transfer";
  * - 표시 시: transfer 중 to_account 가 저축·투자 계좌이면 'savings' 로 분류
  */
 export type TxKind = "income" | "expense" | "transfer" | "savings";
-
-/**
- * 계좌 역할 — UI 그룹화 및 자산 계산에 사용
- * - checking: 입출금 (cash, checking, pay_app)
- * - spending: 지출수단 (credit_card, debit_card)
- * - savings:  저축·투자 (savings, asset)
- * - debt:     부채 (loan)
- */
-export type AccountRole = "checking" | "spending" | "savings" | "debt";
-
-export function getAccountRole(type: string): AccountRole {
-  switch (type) {
-    case "cash":
-    case "checking":
-    case "pay_app":
-      return "checking";
-    case "credit_card":
-    case "debit_card":
-      return "spending";
-    case "savings":
-    case "asset":
-      return "savings";
-    case "loan":
-      return "debt";
-    default:
-      return "checking";
-  }
-}
 
 export interface CategoryRow {
   id: string;

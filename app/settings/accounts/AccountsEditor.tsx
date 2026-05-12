@@ -3,7 +3,8 @@
 import { useState, useTransition } from "react";
 import clsx from "clsx";
 import { upsertAccount, archiveAccount } from "@/app/actions";
-import { getAccountRole, type AccountRow, type AccountRole } from "@/lib/data";
+import type { AccountRow } from "@/lib/data";
+import { getAccountRole, type AccountRole } from "@/lib/accountRole";
 import { formatKRW } from "@/lib/formatKorean";
 
 interface Props {
