@@ -2,8 +2,8 @@
  * 한국식 금액 표기 유틸
  *
  * 표기 규칙
- * - < 10,000           → "3,900원"
- * - 1만 ~ 9,999만      → "62만 8천원" / "184만 7,200원" / "41만원"
+ * - < 100,000          → "99,999원" / "3,900원" (콤마 표기, precision 무관)
+ * - 10만 ~ 9,999만     → "10만원" / "62만 8천원" / "184만 7,200원" (precision 적용)
  * - 1억 이상           → "3억 1,052만원" / "4억 305만원"
  *
  * 옵션:
@@ -29,6 +29,7 @@ export interface FormatOptions {
 const EOK = 100_000_000;
 const MAN = 10_000;
 const CHEON = 1_000;
+const TEN_MAN = 100_000;
 
 export function formatKRW(amount: number, options: FormatOptions = {}): string {
   const { precision = "man+thousand", sign = false, suffix = "원" } = options;
@@ -36,12 +37,12 @@ export function formatKRW(amount: number, options: FormatOptions = {}): string {
   const abs = Math.abs(Math.trunc(amount));
   const signStr = isNegative ? "-" : sign ? "+" : "";
 
-  // < 1만 : 그대로 콤마
-  if (abs < MAN) {
+  // < 10만 : 정확한 콤마 표기 (precision 무관)
+  if (abs < TEN_MAN) {
     return `${signStr}${abs.toLocaleString("ko-KR")}${suffix}`;
   }
 
-  // 1만 ~ 9,999만
+  // 10만 ~ 9,999만
   if (abs < EOK) {
     return `${signStr}${formatManScope(abs, precision)}${suffix}`;
   }

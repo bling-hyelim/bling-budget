@@ -451,18 +451,20 @@ export async function getMonthSummary(
     .map(([name, v]) => ({ name, color: v.color, amount: v.amount }))
     .sort((a, b) => b.amount - a.amount);
 
-  // 카테고리별 수입
-  const incMap = new Map<string, { color: string; amount: number }>();
+  // 카테고리별 수입 — 수입은 대분류가 1개라 의미 없으니 소분류 기준으로 노출
+  const incMap = new Map<string, number>();
   for (const t of txs) {
-    if (t.kind !== "income" || !t.category_name) continue;
-    const prev = incMap.get(t.category_name);
-    incMap.set(t.category_name, {
-      color: prev?.color ?? "#2281E7",
-      amount: (prev?.amount ?? 0) + t.amount,
-    });
+    if (t.kind !== "income") continue;
+    const name = t.subcategory_name ?? t.category_name;
+    if (!name) continue;
+    incMap.set(name, (incMap.get(name) ?? 0) + t.amount);
   }
   const incomeCategories = [...incMap.entries()]
-    .map(([name, v]) => ({ name, color: v.color, amount: v.amount }))
+    .map(([name, amount]) => ({
+      name,
+      color: colorForIncomeSub(name),
+      amount,
+    }))
     .sort((a, b) => b.amount - a.amount);
 
   // 저축 — destination account 별
@@ -525,6 +527,22 @@ function colorForCategory(name: string): string {
   const found = mock.EXPENSE_CATEGORIES.find((c) => c.name === name);
   if (found) return found.color;
   return "#888780";
+}
+
+const INCOME_SUB_BUILTIN: Record<string, string> = {
+  월급:   "#2281E7",
+  부수입: "#6BB5F0",
+  이자:   "#185FA5",
+  기타:   "#88D67E",
+};
+const INCOME_SUB_FALLBACK = ["#7CCEDB", "#A9A4C2", "#FFC371", "#9F8FE0", "#FFA89E"];
+
+function colorForIncomeSub(name: string): string {
+  if (INCOME_SUB_BUILTIN[name]) return INCOME_SUB_BUILTIN[name];
+  // 이름 hash 기반 안정적 배색
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  return INCOME_SUB_FALLBACK[h % INCOME_SUB_FALLBACK.length];
 }
 
 /* ---------------- 자산 요약 ---------------- */
