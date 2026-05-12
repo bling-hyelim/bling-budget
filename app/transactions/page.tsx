@@ -6,13 +6,14 @@ import { getTransactionsByMonth, type TransactionRow } from "@/lib/data";
 
 const DAY_NAMES = ["일", "월", "화", "수", "목", "금", "토"];
 
-type Filter = "all" | "income" | "expense" | "transfer";
+type Filter = "all" | "income" | "expense" | "transfer" | "savings";
 
 const FILTERS: { v: Filter; label: string }[] = [
   { v: "all",      label: "전체" },
   { v: "income",   label: "수입" },
   { v: "expense",  label: "지출" },
   { v: "transfer", label: "이동" },
+  { v: "savings",  label: "저축" },
 ];
 
 // 파스텔 톤 카테고리 컬러
@@ -30,7 +31,8 @@ const CATEGORY_VISUALS: Record<string, { ch: string; bg: string; color: string }
   사회생활:    { ch: "사", bg: "#FFE3D0", color: "#9C5E29" },
   금융비용:    { ch: "금", bg: "#E5E2EE", color: "#5C5678" },
   기타:        { ch: "기", bg: "#ECE9E0", color: "#6F6A5E" },
-  이동:        { ch: "↔", bg: "#E2F0E0", color: "#37A322" },
+  이동:        { ch: "↔", bg: "#ECE9E0", color: "#5F5E5A" },
+  저축:        { ch: "저", bg: "#D9F0E0", color: "#1D6E50" },
   월급:        { ch: "수", bg: "#DCEBFE", color: "#2281E7" },
   이자:        { ch: "수", bg: "#DCEBFE", color: "#2281E7" },
   부수입:      { ch: "수", bg: "#DCEBFE", color: "#2281E7" },
@@ -49,10 +51,11 @@ export default async function TransactionsPage({
   const filter = parseFilter(searchParams.f);
 
   const all = await getTransactionsByMonth(year, month);
-  const txs = filter === "all" ? all : all.filter((t) => t.type === filter);
+  const txs = filter === "all" ? all : all.filter((t) => t.kind === filter);
 
-  const income = all.filter((t) => t.type === "income").reduce((s, t) => s + t.amount, 0);
-  const expense = all.filter((t) => t.type === "expense").reduce((s, t) => s + t.amount, 0);
+  const income = all.filter((t) => t.kind === "income").reduce((s, t) => s + t.amount, 0);
+  const expense = all.filter((t) => t.kind === "expense").reduce((s, t) => s + t.amount, 0);
+  const savings = all.filter((t) => t.kind === "savings").reduce((s, t) => s + t.amount, 0);
   const balance = income - expense;
   const grouped = groupByDate(txs);
 
@@ -150,8 +153,15 @@ export default async function TransactionsPage({
       ) : (
         <div className="card px-2 py-2 divide-y divide-[var(--line)]">
           {grouped.map(([date, rows]) => {
+            // 이동/저축은 자산이 이동만 할 뿐 순증감 0 이므로 일자 합계에서 제외
             const dayTotal = rows.reduce(
-              (s, r) => s + (r.type === "income" ? r.amount : -r.amount),
+              (s, r) =>
+                s +
+                (r.kind === "income"
+                  ? r.amount
+                  : r.kind === "expense"
+                  ? -r.amount
+                  : 0),
               0
             );
             return (
@@ -183,15 +193,25 @@ export default async function TransactionsPage({
 }
 
 function TxItem({ row }: { row: TransactionRow }) {
-  const catName = row.category_name ?? (row.type === "transfer" ? "이동" : "기타");
+  const isSavings = row.kind === "savings";
+  const isTransfer = row.kind === "transfer";
+  const catName =
+    row.category_name ?? (isSavings ? "저축" : isTransfer ? "이동" : "기타");
   const vis = CATEGORY_VISUALS[catName] || {
     ch: catName.charAt(0),
     bg: "#F1EFE8",
     color: "#5F5E5A",
   };
-  const sign = row.type === "income" ? "+" : row.type === "expense" ? "-" : "↔";
+  const sign =
+    row.kind === "income" ? "+" : row.kind === "expense" ? "-" : isSavings ? "↑" : "↔";
   const amountClass =
-    row.type === "income" ? "text-teal-800" : row.type === "transfer" ? "text-ink-soft" : "text-ink";
+    row.kind === "income"
+      ? "text-teal-800"
+      : row.kind === "expense"
+      ? "text-ink"
+      : isSavings
+      ? "text-[#1D6E50]"
+      : "text-ink-soft";
 
   return (
     <li>
@@ -241,7 +261,7 @@ function clampYear(raw: string | undefined, fallback: number): number {
 }
 
 function parseFilter(raw: string | undefined): Filter {
-  if (raw === "income" || raw === "expense" || raw === "transfer") return raw;
+  if (raw === "income" || raw === "expense" || raw === "transfer" || raw === "savings") return raw;
   return "all";
 }
 

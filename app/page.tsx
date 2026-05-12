@@ -2,15 +2,37 @@ import Link from "next/link";
 import { KoreanAmount } from "@/components/KoreanAmount";
 import { Donut } from "@/components/Donut";
 import { formatKRW } from "@/lib/formatKorean";
-import { getAssetSummary, getMonthSummary, getYearlyTrend } from "@/lib/data";
+import {
+  getAssetSummary,
+  getMonthSummary,
+  getYearlyTrend,
+  processRecurringDue,
+} from "@/lib/data";
 
-type CatView = "expense" | "income";
+type CatView = "expense" | "income" | "savings";
 
 interface SearchParams {
   cat?: string;
   m?: string;
   y?: string;
 }
+
+function parseCatView(raw: string | undefined): CatView {
+  if (raw === "income" || raw === "savings") return raw;
+  return "expense";
+}
+
+const VIEW_COLORS: Record<CatView, { accent: string; soft: string }> = {
+  expense: { accent: "#FF5F85", soft: "#FFEAEF" },
+  income:  { accent: "#2281E7", soft: "#DCEBFE" },
+  savings: { accent: "#1D9E75", soft: "#D9F0E0" },
+};
+
+const VIEW_LABELS: Record<CatView, { center: string; chart: string; empty: string }> = {
+  expense: { center: "총 지출", chart: "월별 지출 · 탭해서 이동", empty: "이번달 지출이 아직 없어요" },
+  income:  { center: "총 수입", chart: "월별 수입 · 탭해서 이동", empty: "이번달 수입이 아직 없어요" },
+  savings: { center: "총 저축", chart: "월별 저축 · 탭해서 이동", empty: "이번달 저축이 아직 없어요" },
+};
 
 export default async function HomePage({
   searchParams,
@@ -22,7 +44,10 @@ export default async function HomePage({
   const realMonth = now.getMonth() + 1;
   const year = clampYear(searchParams.y, realYear);
   const month = clampMonth(searchParams.m, realMonth);
-  const catView: CatView = searchParams.cat === "income" ? "income" : "expense";
+  const catView: CatView = parseCatView(searchParams.cat);
+
+  // 홈 진입 시 만기 고정비 자동 기록 (idempotent)
+  await processRecurringDue();
 
   const [asset, summary, yearly] = await Promise.all([
     getAssetSummary(),
@@ -30,20 +55,33 @@ export default async function HomePage({
     getYearlyTrend(year),
   ]);
 
-  const isExpenseView = catView === "expense";
-  const yearlyValues = yearly.map((y) => (isExpenseView ? y.expense : y.income));
+  const yearlyValues = yearly.map((y) =>
+    catView === "expense" ? y.expense : catView === "income" ? y.income : y.savings
+  );
   const yearMax = Math.max(...yearlyValues) || 1;
   const yearTotal = yearlyValues.reduce((s, n) => s + n, 0);
   const hasYearData = yearTotal > 0;
   const hasData = asset.netWorth !== 0 || summary.income !== 0 || summary.expense !== 0;
 
-  const breakdown = isExpenseView ? summary.expenseCategories : summary.incomeCategories;
+  const breakdown =
+    catView === "expense"
+      ? summary.expenseCategories
+      : catView === "income"
+      ? summary.incomeCategories
+      : summary.savingsCategories;
   const breakdownTotal = breakdown.reduce((s, c) => s + c.amount, 0);
-  const paymentBreakdown = isExpenseView ? summary.expensePayments : summary.incomePayments;
+  // 결제수단별은 지출/수입에만 의미 — 저축은 destination account 별로 이미 카테고리에 노출됨
+  const paymentBreakdown =
+    catView === "expense"
+      ? summary.expensePayments
+      : catView === "income"
+      ? summary.incomePayments
+      : [];
   const isCurrentMonth = month === realMonth && year === realYear;
   const isCurrentYear = year === realYear;
-  const accentColor = isExpenseView ? "#FF5F85" : "#2281E7";
-  const accentSoftColor = isExpenseView ? "#FFEAEF" : "#DCEBFE";
+  const accentColor = VIEW_COLORS[catView].accent;
+  const accentSoftColor = VIEW_COLORS[catView].soft;
+  const labels = VIEW_LABELS[catView];
 
   return (
     <div className="px-5 pt-3 pb-6 space-y-7">
@@ -61,12 +99,12 @@ export default async function HomePage({
           <div className="mt-1 mb-5 text-[40px] font-medium tracking-tight text-white tabular leading-none">
             <KoreanAmount value={asset.netWorth} precision="man" fadeSuffix suffixClassName="text-white/40" />
           </div>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-2 gap-2">
             {asset.groups.map((g) => (
               <div key={g.label} className="rounded-2xl bg-white/10 px-3 py-2.5">
                 <div className="text-[12px] text-white/60">{g.label}</div>
                 <div
-                  className={`mt-0.5 text-[14px] font-medium tabular ${
+                  className={`mt-0.5 text-[15px] font-medium tabular ${
                     g.total < 0 ? "text-[#FF8FA6]" : "text-white"
                   }`}
                 >
@@ -123,9 +161,10 @@ export default async function HomePage({
         <div className="card px-5 py-5">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-[16px] font-medium">카테고리별</h3>
-            <div className="flex gap-1.5 bg-[var(--surface-soft)] rounded-full p-1">
-              <CatTab label="지출" active={catView === "expense"} kind="expense" href={hrefWith({ cat: "expense", m: String(month), y: String(year) })} />
-              <CatTab label="수입" active={catView === "income"} kind="income" href={hrefWith({ cat: "income", m: String(month), y: String(year) })} />
+            <div className="flex gap-1 bg-[var(--surface-soft)] rounded-full p-1">
+              <CatTab label="지출"  active={catView === "expense"} kind="expense" href={hrefWith({ cat: "expense", m: String(month), y: String(year) })} />
+              <CatTab label="수입"  active={catView === "income"}  kind="income"  href={hrefWith({ cat: "income",  m: String(month), y: String(year) })} />
+              <CatTab label="저축"  active={catView === "savings"} kind="savings" href={hrefWith({ cat: "savings", m: String(month), y: String(year) })} />
             </div>
           </div>
 
@@ -138,7 +177,7 @@ export default async function HomePage({
                   value: c.amount,
                   color: c.color,
                 }))}
-                centerLabel={catView === "expense" ? "총 지출" : "총 수입"}
+                centerLabel={labels.center}
                 centerValue={formatKRW(breakdownTotal, { precision: "man", suffix: "" })}
               />
               <ul className="space-y-2.5">
@@ -151,7 +190,7 @@ export default async function HomePage({
                       className="block w-3 h-3 rounded-[3px]"
                       style={{ background: c.color }}
                     />
-                    <span className="text-[14px]">{c.name}</span>
+                    <span className="text-[14px] truncate">{c.name}</span>
                     <span className="text-[13px] text-ink-muted tabular whitespace-nowrap">
                       {breakdownTotal > 0 && `${Math.round((c.amount / breakdownTotal) * 100)}%`}
                     </span>
@@ -161,7 +200,7 @@ export default async function HomePage({
             </div>
           ) : (
             <div className="rounded-2xl bg-[var(--surface-soft)] px-4 py-8 text-center text-[14px] text-ink-muted">
-              {catView === "expense" ? "이번달 지출이 아직 없어요" : "이번달 수입이 아직 없어요"}
+              {labels.empty}
             </div>
           )}
         </div>
@@ -170,7 +209,7 @@ export default async function HomePage({
         {paymentBreakdown.length > 0 && (
           <div className="card px-5 py-5">
             <h3 className="text-[16px] font-medium mb-4">
-              {isExpenseView ? "지출수단별" : "수입수단별"}
+              {catView === "expense" ? "지출수단별" : "수입수단별"}
             </h3>
             <ul className="space-y-3.5">
               {paymentBreakdown.map((p) => (
@@ -236,12 +275,13 @@ export default async function HomePage({
         </div>
         <div className="card px-5 py-5">
           <div className="flex justify-between items-center text-[12px] text-ink-muted mb-3">
-            <span>월별 지출 · 탭해서 이동</span>
-            <span className="text-coral-700 font-medium">{month}월</span>
+            <span>{labels.chart}</span>
+            <span style={{ color: accentColor }} className="font-medium">{month}월</span>
           </div>
           <div className="flex items-end justify-between gap-1.5 h-[88px] px-0.5">
             {yearly.map((y) => {
-              const value = isExpenseView ? y.expense : y.income;
+              const value =
+                catView === "expense" ? y.expense : catView === "income" ? y.income : y.savings;
               const isOn = y.month === month;
               const isFuture = isCurrentYear && value === 0 && y.month > realMonth;
               const pct = (value / yearMax) * 100;
@@ -275,7 +315,7 @@ export default async function HomePage({
           </div>
           {!hasYearData && (
             <div className="mt-4 rounded-2xl bg-[var(--surface-soft)] px-4 py-3 text-[12px] text-ink-muted text-center">
-              {year}년 {isExpenseView ? "지출" : "수입"} 데이터가 없어요
+              {year}년 {catView === "expense" ? "지출" : catView === "income" ? "수입" : "저축"} 데이터가 없어요
             </div>
           )}
           {!hasData && hasYearData === false && (
@@ -429,12 +469,14 @@ function CatTab({
   label: string;
   active: boolean;
   href: string;
-  kind: "expense" | "income";
+  kind: "expense" | "income" | "savings";
 }) {
   const colors = active
     ? kind === "expense"
       ? { bg: "#FFEAEF", text: "#B82654" }
-      : { bg: "#DCEBFE", text: "#1264C0" }
+      : kind === "income"
+      ? { bg: "#DCEBFE", text: "#1264C0" }
+      : { bg: "#D9F0E0", text: "#1D6E50" }
     : null;
   return (
     <Link

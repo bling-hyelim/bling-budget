@@ -11,9 +11,10 @@ import {
   updateTransaction,
   deleteTransaction,
 } from "@/app/actions";
-import type { AccountRow, CategoryTreeNode } from "@/lib/data";
+import { getAccountRole, type AccountRow, type CategoryTreeNode } from "@/lib/data";
 
 type TxType = "income" | "expense" | "transfer";
+type TxMode = "income" | "expense" | "transfer" | "savings";
 
 interface InitialValues {
   id: string;
@@ -25,6 +26,7 @@ interface InitialValues {
   toAccountId: string | null;
   memo: string;
   occurredOn: string;
+  isFixed?: boolean;
 }
 
 interface Props {
@@ -34,11 +36,19 @@ interface Props {
   initial?: InitialValues;
 }
 
+/** initial.type + toAccount.role 로 모드 추론 */
+function inferMode(initial: InitialValues | undefined, accounts: AccountRow[]): TxMode {
+  if (!initial) return "expense";
+  if (initial.type !== "transfer") return initial.type;
+  const to = accounts.find((a) => a.id === initial.toAccountId);
+  return to?.role === "savings" ? "savings" : "transfer";
+}
+
 export function InputForm({ categories, accounts, mode = "create", initial }: Props) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
 
-  const [type, setType] = useState<TxType>(initial?.type ?? "expense");
+  const [txMode, setTxMode] = useState<TxMode>(inferMode(initial, accounts));
   const [amountStr, setAmountStr] = useState<string>(
     initial ? String(initial.amount) : ""
   );
@@ -52,16 +62,18 @@ export function InputForm({ categories, accounts, mode = "create", initial }: Pr
   );
   const [memo, setMemo] = useState<string>(initial?.memo ?? "");
   const [occurredOn, setOccurredOn] = useState<string>(initial?.occurredOn ?? todayIso());
+  const [isFixed, setIsFixed] = useState<boolean>(initial?.isFixed ?? false);
   const [editingStep, setEditingStep] = useState<number | null>(null);
   const [toast, setToast] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
 
   const amountNum = Number(amountStr) || 0;
+  const isTransferLike = txMode === "transfer" || txMode === "savings";
 
   const visibleParents = useMemo(() => {
-    if (type === "income") return categories.filter((c) => c.kind === "income");
-    if (type === "expense") return categories.filter((c) => c.kind === "expense");
+    if (txMode === "income") return categories.filter((c) => c.kind === "income");
+    if (txMode === "expense") return categories.filter((c) => c.kind === "expense");
     return [];
-  }, [type, categories]);
+  }, [txMode, categories]);
 
   const currentParent = useMemo(
     () => visibleParents.find((c) => c.id === categoryId) ?? null,
@@ -70,7 +82,7 @@ export function InputForm({ categories, accounts, mode = "create", initial }: Pr
 
   const activeStep = useMemo<number>(() => {
     if (editingStep !== null) return editingStep;
-    if (type === "transfer") {
+    if (isTransferLike) {
       if (!accountId) return 1;
       if (!toAccountId) return 2;
       return 3;
@@ -79,12 +91,12 @@ export function InputForm({ categories, accounts, mode = "create", initial }: Pr
     if (!subcategoryId) return 2;
     if (!accountId) return 3;
     return 4;
-  }, [type, accountId, toAccountId, categoryId, subcategoryId, editingStep]);
+  }, [isTransferLike, accountId, toAccountId, categoryId, subcategoryId, editingStep]);
 
-  const totalSteps = type === "transfer" ? 3 : 4;
+  const totalSteps = isTransferLike ? 3 : 4;
 
-  const handleTypeChange = (t: TxType) => {
-    setType(t);
+  const handleModeChange = (m: TxMode) => {
+    setTxMode(m);
     setCategoryId(null);
     setSubcategoryId(null);
     setAccountId(null);
@@ -112,12 +124,13 @@ export function InputForm({ categories, accounts, mode = "create", initial }: Pr
     setToAccountId(null);
     setMemo("");
     setOccurredOn(todayIso());
+    setIsFixed(false);
     setEditingStep(null);
   };
 
   const canSave =
     amountNum > 0 &&
-    (type === "transfer"
+    (isTransferLike
       ? !!accountId && !!toAccountId && accountId !== toAccountId
       : !!categoryId && !!subcategoryId && !!accountId);
 
@@ -125,15 +138,19 @@ export function InputForm({ categories, accounts, mode = "create", initial }: Pr
     if (!canSave || !accountId) return;
 
     startTransition(async () => {
+      // 저장 시 type 은 항상 income/expense/transfer 중 하나 (저축은 transfer 로 저장)
+      const persistedType: TxType =
+        txMode === "savings" ? "transfer" : (txMode as TxType);
       const payload = {
-        type,
+        type: persistedType,
         amount: amountNum,
         occurred_on: occurredOn,
-        category_id: type === "transfer" ? null : categoryId,
-        subcategory_id: type === "transfer" ? null : subcategoryId,
+        category_id: isTransferLike ? null : categoryId,
+        subcategory_id: isTransferLike ? null : subcategoryId,
         account_id: accountId!,
-        to_account_id: type === "transfer" ? toAccountId : null,
+        to_account_id: isTransferLike ? toAccountId : null,
         memo: memo || undefined,
+        is_fixed: isFixed,
       };
 
       const res =
@@ -181,7 +198,13 @@ export function InputForm({ categories, accounts, mode = "create", initial }: Pr
         <h1 className="text-[17px] font-medium">
           {mode === "edit" ? "거래 수정" : (
             <>
-              {type === "income" ? "수입" : type === "expense" ? "지출" : "이동"} 입력
+              {txMode === "income"
+                ? "수입"
+                : txMode === "expense"
+                ? "지출"
+                : txMode === "savings"
+                ? "저축"
+                : "이동"} 입력
             </>
           )}
         </h1>
@@ -202,13 +225,19 @@ export function InputForm({ categories, accounts, mode = "create", initial }: Pr
       <StepBar total={totalSteps} active={activeStep} />
 
       <div className="flex gap-1.5">
-        <TypeTab label="수입" active={type === "income"} accent="income" onClick={() => handleTypeChange("income")} />
-        <TypeTab label="지출" active={type === "expense"} accent="expense" onClick={() => handleTypeChange("expense")} />
-        <TypeTab label="이동" active={type === "transfer"} accent="transfer" onClick={() => handleTypeChange("transfer")} />
+        <TypeTab label="수입" active={txMode === "income"}   accent="income"   onClick={() => handleModeChange("income")} />
+        <TypeTab label="지출" active={txMode === "expense"}  accent="expense"  onClick={() => handleModeChange("expense")} />
+        <TypeTab label="이동" active={txMode === "transfer"} accent="transfer" onClick={() => handleModeChange("transfer")} />
+        <TypeTab label="저축" active={txMode === "savings"}  accent="savings"  onClick={() => handleModeChange("savings")} />
       </div>
-      {type === "transfer" && (
+      {txMode === "transfer" && (
         <p className="text-[12px] text-ink-muted px-1 leading-relaxed">
-          💡 저축·투자 (적금/주식/청약/연금) 와 신용카드 납부도 이동으로 기록해요
+          💡 신용카드 결제, 통장 간 이체 등 단순 자금 이동을 기록해요
+        </p>
+      )}
+      {txMode === "savings" && (
+        <p className="text-[12px] text-ink-muted px-1 leading-relaxed">
+          💡 적금·주식·청약·연금 등 저축·투자 계좌로 보내는 금액을 기록해요
         </p>
       )}
 
@@ -231,9 +260,16 @@ export function InputForm({ categories, accounts, mode = "create", initial }: Pr
             {amountNum > 0 ? toKoreanReading(amountNum) : "0"}
           </div>
         </div>
+        {(txMode === "income" || txMode === "expense") && (
+          <FixedToggle
+            checked={isFixed}
+            mode={txMode}
+            onChange={() => setIsFixed((v) => !v)}
+          />
+        )}
       </div>
 
-      {type !== "transfer" ? (
+      {!isTransferLike ? (
         <>
           <StepCard
             num={1}
@@ -356,7 +392,7 @@ export function InputForm({ categories, accounts, mode = "create", initial }: Pr
 
           <StepCard
             num={2}
-            title="입금 계좌"
+            title={txMode === "savings" ? "저축·투자 계좌" : "입금 계좌"}
             done={!!toAccountId}
             active={activeStep === 2}
             value={accounts.find((a) => a.id === toAccountId)?.name}
@@ -364,12 +400,19 @@ export function InputForm({ categories, accounts, mode = "create", initial }: Pr
             onEdit={() => setEditingStep(2)}
           >
             <AccountChips
-              accounts={accounts.filter((a) => a.id !== accountId)}
+              accounts={accounts
+                .filter((a) => a.id !== accountId)
+                .filter((a) => txMode === "savings" ? a.role === "savings" : true)}
               selected={toAccountId}
               onSelect={(id) => {
                 setToAccountId(id);
                 setEditingStep(null);
               }}
+              emptyHint={
+                txMode === "savings"
+                  ? "저축·투자 계좌가 없어요"
+                  : undefined
+              }
             />
           </StepCard>
 
@@ -485,6 +528,34 @@ function StepBar({ total, active }: { total: number; active: number }) {
   );
 }
 
+function FixedToggle({
+  checked,
+  mode,
+  onChange,
+}: {
+  checked: boolean;
+  mode: "income" | "expense";
+  onChange: () => void;
+}) {
+  const label = mode === "income" ? "고정 수입" : "고정 지출";
+  return (
+    <button
+      type="button"
+      onClick={onChange}
+      aria-pressed={checked}
+      className={clsx(
+        "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[13px] transition-colors",
+        checked
+          ? "bg-ink text-white"
+          : "bg-[var(--surface-soft)] text-ink-muted"
+      )}
+    >
+      <span className="text-[11px]">{checked ? "✓" : "○"}</span>
+      <span>{label}</span>
+    </button>
+  );
+}
+
 function TypeTab({
   label,
   active,
@@ -493,7 +564,7 @@ function TypeTab({
 }: {
   label: string;
   active: boolean;
-  accent: "income" | "expense" | "transfer";
+  accent: "income" | "expense" | "transfer" | "savings";
   onClick: () => void;
 }) {
   return (
@@ -502,10 +573,16 @@ function TypeTab({
       className={clsx(
         "flex-1 py-2 rounded-full text-[14px] transition-colors",
         !active && "bg-[var(--surface-soft)] text-ink-muted",
-        active && accent === "income" && "bg-teal-50 text-teal-800 font-medium",
-        active && accent === "expense" && "bg-coral-50 text-coral-800 font-medium",
-        active && accent === "transfer" && "bg-[var(--surface)] text-ink font-medium border border-ink-line"
+        active && accent === "income"   && "bg-teal-50 text-teal-800 font-medium",
+        active && accent === "expense"  && "bg-coral-50 text-coral-800 font-medium",
+        active && accent === "transfer" && "bg-[var(--surface)] text-ink font-medium border border-ink-line",
+        active && accent === "savings"  && "font-medium",
       )}
+      style={
+        active && accent === "savings"
+          ? { background: "#D9F0E0", color: "#1D6E50" }
+          : undefined
+      }
     >
       {label}
     </button>
@@ -580,10 +657,12 @@ function AccountChips({
   accounts,
   selected,
   onSelect,
+  emptyHint,
 }: {
   accounts: AccountRow[];
   selected: string | null;
   onSelect: (id: string) => void;
+  emptyHint?: string;
 }) {
   const FAVORITE_TYPES = ["credit_card", "checking", "debit_card", "cash"];
   const favorites = accounts
@@ -594,7 +673,7 @@ function AccountChips({
   if (accounts.length === 0) {
     return (
       <div className="text-[13px] text-ink-muted py-2">
-        등록된 계좌가 없어요.{" "}
+        {emptyHint ?? "등록된 계좌가 없어요."}{" "}
         <Link href="/settings/accounts" className="text-coral-800 font-medium">
           설정에서 추가
         </Link>

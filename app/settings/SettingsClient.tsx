@@ -65,6 +65,12 @@ export function SettingsClient({
           value={`${accountCount}개`}
         />
         <Row
+          href="/settings/fixed"
+          icon={<IconRepeat />}
+          label="고정 수입·지출"
+          value="매월 자동 기록"
+        />
+        <Row
           href="/settings/budget"
           icon={<IconTrend />}
           label="월별 예산 설정"
@@ -274,6 +280,16 @@ function IconOut() {
       <path d="M16 17l5-5-5-5" />
       <path d="M21 12H9" />
       <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+    </svg>
+  );
+}
+function IconRepeat() {
+  return (
+    <svg className={ic} viewBox="0 0 24 24" {...stroke}>
+      <path d="M17 1l4 4-4 4" />
+      <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+      <path d="M7 23l-4-4 4-4" />
+      <path d="M21 13v2a4 4 0 0 1-4 4H3" />
     </svg>
   );
 }

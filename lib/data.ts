@@ -14,6 +14,41 @@ import * as mock from "@/lib/mockData";
 
 export type TxType = "income" | "expense" | "transfer";
 
+/**
+ * 거래의 표시 분류
+ * - 저장 시: type 은 항상 income/expense/transfer 중 하나
+ * - 표시 시: transfer 중 to_account 가 저축·투자 계좌이면 'savings' 로 분류
+ */
+export type TxKind = "income" | "expense" | "transfer" | "savings";
+
+/**
+ * 계좌 역할 — UI 그룹화 및 자산 계산에 사용
+ * - checking: 입출금 (cash, checking, pay_app)
+ * - spending: 지출수단 (credit_card, debit_card)
+ * - savings:  저축·투자 (savings, asset)
+ * - debt:     부채 (loan)
+ */
+export type AccountRole = "checking" | "spending" | "savings" | "debt";
+
+export function getAccountRole(type: string): AccountRole {
+  switch (type) {
+    case "cash":
+    case "checking":
+    case "pay_app":
+      return "checking";
+    case "credit_card":
+    case "debit_card":
+      return "spending";
+    case "savings":
+    case "asset":
+      return "savings";
+    case "loan":
+      return "debt";
+    default:
+      return "checking";
+  }
+}
+
 export interface CategoryRow {
   id: string;
   name: string;
@@ -31,6 +66,7 @@ export interface AccountRow {
   id: string;
   name: string;
   type: string;
+  role: AccountRole;
   initial_balance: number;
   balance: number; // 시작 잔액 + 거래 누적
   color: string | null;
@@ -42,10 +78,13 @@ export interface TransactionRow {
   occurred_on: string;
   amount: number;
   type: TxType;
+  /** 표시 분류 (transfer→savings 변환 포함) */
+  kind: TxKind;
   category_name: string | null;
   subcategory_name: string | null;
   account_name: string;
   to_account_name: string | null;
+  to_account_role: AccountRole | null;
   memo: string | null;
   is_fixed: boolean;
 }
@@ -53,11 +92,15 @@ export interface TransactionRow {
 export interface MonthSummary {
   income: number;
   expense: number;
+  /** 저축 총액 (transfer→savings) */
+  savings: number;
   balance: number;
   /** 지출 카테고리 (큰 순) */
   expenseCategories: { name: string; color: string; amount: number }[];
   /** 수입 카테고리 (큰 순) */
   incomeCategories: { name: string; color: string; amount: number }[];
+  /** 저축 — destination account 별 */
+  savingsCategories: { name: string; color: string; amount: number }[];
   /** 지출수단별 */
   expensePayments: { name: string; type: string; amount: number; pct: number }[];
   /** 수입수단별 */
@@ -65,8 +108,11 @@ export interface MonthSummary {
 }
 
 export interface AssetGroupDetail {
-  label: "현금·예금" | "저축·연금" | "대출";
+  label: "입출금" | "지출수단" | "저축·투자" | "대출";
+  role: AccountRole;
   total: number;
+  /** 자산 합산에 들어가는 부호 (대출만 -1, 나머지 +1) */
+  sign: 1 | -1;
   accounts: AccountRow[];
 }
 
@@ -234,6 +280,7 @@ export async function getAccounts(): Promise<AccountRow[]> {
             id: a.id,
             name: a.name,
             type: a.type,
+            role: getAccountRole(a.type),
             initial_balance: init,
             balance: init + (delta.get(a.id) ?? 0),
             color: a.color ?? null,
@@ -247,6 +294,7 @@ export async function getAccounts(): Promise<AccountRow[]> {
     id: a.id,
     name: a.name,
     type: a.type,
+    role: getAccountRole(a.type),
     initial_balance: a.balance,
     balance: a.balance,
     color: null,
@@ -273,7 +321,7 @@ export async function getTransactionsByMonth(
            category:categories!transactions_category_id_fkey(name),
            subcategory:categories!transactions_subcategory_id_fkey(name),
            account:accounts!transactions_account_id_fkey(name),
-           to_account:accounts!transactions_to_account_id_fkey(name)`
+           to_account:accounts!transactions_to_account_id_fkey(name, type)`
         )
         .eq("user_id", user.id)
         .gte("occurred_on", start)
@@ -281,37 +329,58 @@ export async function getTransactionsByMonth(
         .order("occurred_on", { ascending: false });
       if (!error && data) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return (data as any[]).map((r) => ({
-          id: r.id,
-          occurred_on: r.occurred_on,
-          amount: Number(r.amount),
-          type: r.type as TxType,
-          category_name: r.category?.name ?? null,
-          subcategory_name: r.subcategory?.name ?? null,
-          account_name: r.account?.name ?? "",
-          to_account_name: r.to_account?.name ?? null,
-          memo: r.memo,
-          is_fixed: r.is_fixed,
-        }));
+        return (data as any[]).map((r) => {
+          const toRole: AccountRole | null = r.to_account?.type
+            ? getAccountRole(r.to_account.type)
+            : null;
+          const type = r.type as TxType;
+          const kind: TxKind =
+            type === "transfer" && toRole === "savings" ? "savings" : type;
+          return {
+            id: r.id,
+            occurred_on: r.occurred_on,
+            amount: Number(r.amount),
+            type,
+            kind,
+            category_name: r.category?.name ?? null,
+            subcategory_name: r.subcategory?.name ?? null,
+            account_name: r.account?.name ?? "",
+            to_account_name: r.to_account?.name ?? null,
+            to_account_role: toRole,
+            memo: r.memo,
+            is_fixed: r.is_fixed,
+          };
+        });
       }
     }
   }
-  // mock — 월 필터링
+  // mock — 월 필터링 (계좌 type 정보 동기 조회)
+  const accountTypeByName = new Map<string, string>(
+    mock.MOCK_ACCOUNTS.map((a) => [a.name, a.type])
+  );
   return mock.MOCK_TRANSACTIONS.filter((t) => {
     const [y, m] = t.date.split("-").map(Number);
     return y === year && m === month;
-  }).map((t) => ({
-    id: t.id,
-    occurred_on: t.date,
-    amount: t.amount,
-    type: t.type,
-    category_name: t.category,
-    subcategory_name: t.subcategory ?? null,
-    account_name: t.accountName,
-    to_account_name: t.toAccountName ?? null,
-    memo: t.memo,
-    is_fixed: !!t.isFixed,
-  }));
+  }).map((t) => {
+    const toType = t.toAccountName ? accountTypeByName.get(t.toAccountName) : undefined;
+    const toRole: AccountRole | null = toType ? getAccountRole(toType) : null;
+    const kind: TxKind =
+      t.type === "transfer" && toRole === "savings" ? "savings" : t.type;
+    return {
+      id: t.id,
+      occurred_on: t.date,
+      amount: t.amount,
+      type: t.type,
+      kind,
+      category_name: t.category,
+      subcategory_name: t.subcategory ?? null,
+      account_name: t.accountName,
+      to_account_name: t.toAccountName ?? null,
+      to_account_role: toRole,
+      memo: t.memo,
+      is_fixed: !!t.isFixed,
+    };
+  });
 }
 
 export interface RawTransaction {
@@ -388,13 +457,14 @@ export async function getMonthSummary(
   const accounts = await getAccounts();
   const accountByName = new Map(accounts.map((a) => [a.name, a.type]));
 
-  const income = sum(txs.filter((t) => t.type === "income").map((t) => t.amount));
-  const expense = sum(txs.filter((t) => t.type === "expense").map((t) => t.amount));
+  const income = sum(txs.filter((t) => t.kind === "income").map((t) => t.amount));
+  const expense = sum(txs.filter((t) => t.kind === "expense").map((t) => t.amount));
+  const savings = sum(txs.filter((t) => t.kind === "savings").map((t) => t.amount));
 
   // 카테고리별 지출
   const expMap = new Map<string, { color: string; amount: number }>();
   for (const t of txs) {
-    if (t.type !== "expense" || !t.category_name) continue;
+    if (t.kind !== "expense" || !t.category_name) continue;
     const prev = expMap.get(t.category_name);
     expMap.set(t.category_name, {
       color: colorForCategory(t.category_name),
@@ -408,10 +478,10 @@ export async function getMonthSummary(
   // 카테고리별 수입
   const incMap = new Map<string, { color: string; amount: number }>();
   for (const t of txs) {
-    if (t.type !== "income" || !t.category_name) continue;
+    if (t.kind !== "income" || !t.category_name) continue;
     const prev = incMap.get(t.category_name);
     incMap.set(t.category_name, {
-      color: prev?.color ?? "#1D9E75",
+      color: prev?.color ?? "#2281E7",
       amount: (prev?.amount ?? 0) + t.amount,
     });
   }
@@ -419,14 +489,29 @@ export async function getMonthSummary(
     .map(([name, v]) => ({ name, color: v.color, amount: v.amount }))
     .sort((a, b) => b.amount - a.amount);
 
+  // 저축 — destination account 별
+  const SAVINGS_PALETTE = ["#7CCEDB", "#88D67E", "#A9A4C2", "#FFC371", "#9F8FE0"];
+  const savMap = new Map<string, number>();
+  for (const t of txs) {
+    if (t.kind !== "savings" || !t.to_account_name) continue;
+    savMap.set(t.to_account_name, (savMap.get(t.to_account_name) ?? 0) + t.amount);
+  }
+  const savingsCategories = [...savMap.entries()]
+    .map(([name, amount], i) => ({
+      name,
+      color: SAVINGS_PALETTE[i % SAVINGS_PALETTE.length],
+      amount,
+    }))
+    .sort((a, b) => b.amount - a.amount);
+
   // 결제수단별 (계좌 type 기준 묶기) — 지출/수입 각각
   const expPayMap = new Map<string, { type: string; amount: number }>();
   const incPayMap = new Map<string, { type: string; amount: number }>();
   for (const t of txs) {
-    if (t.type !== "expense" && t.type !== "income") continue;
+    if (t.kind !== "expense" && t.kind !== "income") continue;
     const type = accountByName.get(t.account_name) ?? "other";
     const label = paymentLabel(type);
-    const map = t.type === "expense" ? expPayMap : incPayMap;
+    const map = t.kind === "expense" ? expPayMap : incPayMap;
     const prev = map.get(label);
     map.set(label, { type, amount: (prev?.amount ?? 0) + t.amount });
   }
@@ -445,9 +530,11 @@ export async function getMonthSummary(
   return {
     income,
     expense,
+    savings,
     balance: income - expense,
     expenseCategories,
     incomeCategories,
+    savingsCategories,
     expensePayments: buildPayments(expPayMap),
     incomePayments: buildPayments(incPayMap),
   };
@@ -468,24 +555,27 @@ function colorForCategory(name: string): string {
 
 export async function getAssetSummary(): Promise<AssetSummary> {
   const accounts = await getAccounts();
-  const cashKinds = new Set(["cash", "checking", "debit_card", "pay_app"]);
-  const savingKinds = new Set(["savings", "asset"]);
-  const debtKinds = new Set(["loan"]);
 
-  const cash = accounts.filter((a) => cashKinds.has(a.type));
-  const savings = accounts.filter((a) => savingKinds.has(a.type));
-  const debts = accounts.filter((a) => debtKinds.has(a.type));
+  const checking = accounts.filter((a) => a.role === "checking");
+  const spending = accounts.filter((a) => a.role === "spending");
+  const savings = accounts.filter((a) => a.role === "savings");
+  const debts = accounts.filter((a) => a.role === "debt");
 
-  const cashTotal = sum(cash.map((a) => a.balance));
+  const checkingTotal = sum(checking.map((a) => a.balance));
+  const spendingTotal = sum(spending.map((a) => a.balance));
   const savingTotal = sum(savings.map((a) => a.balance));
-  const debtTotal = sum(debts.map((a) => a.balance));
+  // 대출 잔액(= 갚을 금액)은 항상 음수로 반환 — netWorth 계산과 표시 모두 일관되게.
+  const debtTotal = -sum(debts.map((a) => Math.abs(a.balance)));
+
+  const netWorth = checkingTotal + spendingTotal + savingTotal + debtTotal;
 
   return {
-    netWorth: cashTotal + savingTotal + debtTotal,
+    netWorth,
     groups: [
-      { label: "현금·예금", total: cashTotal,   accounts: cash },
-      { label: "저축·연금", total: savingTotal, accounts: savings },
-      { label: "대출",       total: debtTotal,   accounts: debts },
+      { label: "입출금",     role: "checking", total: checkingTotal, sign: 1,  accounts: checking },
+      { label: "지출수단",   role: "spending", total: spendingTotal, sign: 1,  accounts: spending },
+      { label: "저축·투자",  role: "savings",  total: savingTotal,   sign: 1,  accounts: savings },
+      { label: "대출",       role: "debt",     total: debtTotal,     sign: -1, accounts: debts },
     ],
   };
 }
@@ -757,11 +847,11 @@ export async function getYearlyExpense(
   return trend.map(({ month, expense }) => ({ month, expense }));
 }
 
-/** 월별 수입/지출 둘 다 반환 */
+/** 월별 수입/지출/저축 반환 */
 export async function getYearlyTrend(
   year: number
-): Promise<{ month: number; income: number; expense: number }[]> {
-  const result: { month: number; income: number; expense: number }[] = [];
+): Promise<{ month: number; income: number; expense: number; savings: number }[]> {
+  const result: { month: number; income: number; expense: number; savings: number }[] = [];
   if (isConfigured()) {
     const user = await getUser();
     if (user) {
@@ -770,25 +860,37 @@ export async function getYearlyTrend(
       const end = isoDate(year + 1, 1, 1);
       const { data } = await supabase
         .from("transactions")
-        .select("occurred_on, amount, type")
+        .select(
+          `occurred_on, amount, type,
+           to_account:accounts!transactions_to_account_id_fkey(type)`
+        )
         .eq("user_id", user.id)
-        .in("type", ["income", "expense"])
         .gte("occurred_on", start)
         .lt("occurred_on", end);
       const incMap = new Map<number, number>();
       const expMap = new Map<number, number>();
+      const savMap = new Map<number, number>();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       for (const r of (data ?? []) as any[]) {
         const m = Number(r.occurred_on.split("-")[1]);
         const amt = Number(r.amount);
-        if (r.type === "income") incMap.set(m, (incMap.get(m) ?? 0) + amt);
-        else expMap.set(m, (expMap.get(m) ?? 0) + amt);
+        if (r.type === "income") {
+          incMap.set(m, (incMap.get(m) ?? 0) + amt);
+        } else if (r.type === "expense") {
+          expMap.set(m, (expMap.get(m) ?? 0) + amt);
+        } else if (r.type === "transfer") {
+          const toType: string | undefined = r.to_account?.type;
+          if (toType && getAccountRole(toType) === "savings") {
+            savMap.set(m, (savMap.get(m) ?? 0) + amt);
+          }
+        }
       }
       for (let m = 1; m <= 12; m++) {
         result.push({
           month: m,
           income: incMap.get(m) ?? 0,
           expense: expMap.get(m) ?? 0,
+          savings: savMap.get(m) ?? 0,
         });
       }
       return result;
@@ -798,13 +900,17 @@ export async function getYearlyTrend(
   const realYear = new Date().getFullYear();
   if (year !== realYear) {
     for (let m = 1; m <= 12; m++) {
-      result.push({ month: m, income: 0, expense: 0 });
+      result.push({ month: m, income: 0, expense: 0, savings: 0 });
     }
     return result;
   }
-  // 올해 — 실제 mock 거래에서만 합산 (YEARLY_TREND 더미는 사용 안 함)
+  // 올해 — 실제 mock 거래에서만 합산
   const incomeByMonth = new Map<number, number>();
   const expenseByMonth = new Map<number, number>();
+  const savingsByMonth = new Map<number, number>();
+  const accountTypeByName = new Map<string, string>(
+    mock.MOCK_ACCOUNTS.map((a) => [a.name, a.type])
+  );
   for (const t of mock.MOCK_TRANSACTIONS) {
     const [ty, m] = t.date.split("-").map(Number);
     if (ty !== year) continue;
@@ -812,6 +918,11 @@ export async function getYearlyTrend(
       incomeByMonth.set(m, (incomeByMonth.get(m) ?? 0) + t.amount);
     } else if (t.type === "expense") {
       expenseByMonth.set(m, (expenseByMonth.get(m) ?? 0) + t.amount);
+    } else if (t.type === "transfer" && t.toAccountName) {
+      const toType = accountTypeByName.get(t.toAccountName);
+      if (toType && getAccountRole(toType) === "savings") {
+        savingsByMonth.set(m, (savingsByMonth.get(m) ?? 0) + t.amount);
+      }
     }
   }
   for (let m = 1; m <= 12; m++) {
@@ -819,9 +930,132 @@ export async function getYearlyTrend(
       month: m,
       income: incomeByMonth.get(m) ?? 0,
       expense: expenseByMonth.get(m) ?? 0,
+      savings: savingsByMonth.get(m) ?? 0,
     });
   }
   return result;
+}
+
+/* ---------------- 고정비 (recurring) ---------------- */
+
+export interface RecurringRow {
+  id: string;
+  name: string;
+  type: "income" | "expense";
+  amount: number;
+  day_of_month: number;
+  category_id: string | null;
+  subcategory_id: string | null;
+  category_name: string | null;
+  subcategory_name: string | null;
+  account_id: string | null;
+  account_name: string | null;
+  is_active: boolean;
+  next_due: string | null;
+}
+
+export async function getRecurringList(): Promise<RecurringRow[]> {
+  if (!isConfigured()) return [];
+  const user = await getUser();
+  if (!user) return [];
+  const supabase = createClient();
+  const { data, error } = await supabase
+    .from("recurring")
+    .select(
+      `id, name, type, amount, day_of_month, is_active, next_due,
+       category_id, subcategory_id, account_id,
+       category:categories!recurring_category_id_fkey(name),
+       subcategory:categories!recurring_subcategory_id_fkey(name),
+       account:accounts!recurring_account_id_fkey(name)`
+    )
+    .eq("user_id", user.id)
+    .eq("is_active", true)
+    .order("day_of_month", { nullsFirst: false });
+  if (error || !data) return [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (data as any[]).map((r) => ({
+    id: r.id,
+    name: r.name,
+    type: r.type,
+    amount: Number(r.amount),
+    day_of_month: r.day_of_month,
+    category_id: r.category_id,
+    subcategory_id: r.subcategory_id,
+    category_name: r.category?.name ?? null,
+    subcategory_name: r.subcategory?.name ?? null,
+    account_id: r.account_id,
+    account_name: r.account?.name ?? null,
+    is_active: r.is_active,
+    next_due: r.next_due,
+  }));
+}
+
+/**
+ * 만기된 고정비 → 거래내역 자동 생성 (서버 컴포넌트에서 silent 호출)
+ * - next_due <= today 인 활성 recurring 을 찾아 transaction insert
+ * - 이후 next_due 를 다음달 같은 일자로 bump → idempotent
+ * - revalidatePath 는 호출하지 않음 (render path 안전)
+ */
+export async function processRecurringDue(): Promise<number> {
+  if (!isConfigured()) return 0;
+  const user = await getUser();
+  if (!user) return 0;
+  const supabase = createClient();
+
+  const today = new Date();
+  const todayStr = isoOfDate(today);
+
+  const { data: due } = await supabase
+    .from("recurring")
+    .select("id, name, type, amount, day_of_month, category_id, subcategory_id, account_id, next_due")
+    .eq("user_id", user.id)
+    .eq("is_active", true)
+    .lte("next_due", todayStr);
+
+  if (!due || due.length === 0) return 0;
+
+  let inserted = 0;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  for (const r of due as any[]) {
+    if (!r.account_id) continue;
+    let cursor = r.next_due as string;
+    let safety = 0;
+    while (cursor && cursor <= todayStr && safety < 12) {
+      const { error: insErr } = await supabase.from("transactions").insert({
+        user_id: user.id,
+        occurred_on: cursor,
+        amount: Number(r.amount),
+        type: r.type,
+        category_id: r.category_id,
+        subcategory_id: r.subcategory_id,
+        account_id: r.account_id,
+        memo: r.name,
+        is_fixed: true,
+      });
+      if (!insErr) inserted++;
+      cursor = bumpMonth(cursor, r.day_of_month);
+      safety++;
+    }
+    await supabase
+      .from("recurring")
+      .update({ next_due: cursor })
+      .eq("id", r.id)
+      .eq("user_id", user.id);
+  }
+  return inserted;
+}
+
+function isoOfDate(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function bumpMonth(currentIso: string, dayOfMonth: number): string {
+  const [y, m] = currentIso.split("-").map(Number);
+  const d = new Date(y, m, dayOfMonth);
+  return isoOfDate(d);
 }
 
 /* ---------------- 헬퍼 ---------------- */

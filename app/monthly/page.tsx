@@ -28,8 +28,22 @@ export default async function MonthlyReportPage({
         </Link>
         <div className="flex-1">
           <h1 className="text-[20px] font-medium leading-tight">월간 리포트</h1>
-          <div className="text-[12px] text-ink-muted mt-0.5">
-            {year}년 {month}월
+          <div className="mt-1 flex items-center gap-2 text-[13px] text-ink-muted">
+            <Link
+              href={prevHref(year, month)}
+              aria-label="이전 달"
+              className="w-5 h-5 grid place-items-center"
+            >
+              ‹
+            </Link>
+            <span>{year}년 {month}월</span>
+            <Link
+              href={nextHref(year, month)}
+              aria-label="다음 달"
+              className="w-5 h-5 grid place-items-center"
+            >
+              ›
+            </Link>
           </div>
         </div>
       </header>
@@ -241,4 +255,16 @@ function formatDate(iso: string): string {
 function pct(part: number, whole: number): number {
   if (whole <= 0) return 0;
   return Math.round((part / whole) * 100);
+}
+
+function prevHref(year: number, month: number): string {
+  const y = month === 1 ? year - 1 : year;
+  const m = month === 1 ? 12 : month - 1;
+  return `/monthly?y=${y}&m=${m}`;
+}
+
+function nextHref(year: number, month: number): string {
+  const y = month === 12 ? year + 1 : year;
+  const m = month === 12 ? 1 : month + 1;
+  return `/monthly?y=${y}&m=${m}`;
 }

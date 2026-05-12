@@ -30,6 +30,7 @@ export default async function EditTransactionPage({
         toAccountId: tx.to_account_id,
         memo: tx.memo ?? "",
         occurredOn: tx.occurred_on,
+        isFixed: tx.is_fixed,
       }}
     />
   );
