@@ -34,9 +34,12 @@ export async function middleware(request: NextRequest) {
     },
   });
 
+  // 인증 검사 — Supabase Auth 서버에 매번 가지 말고 쿠키의 JWT 만 확인.
+  // JWT 가 서명돼있어서 변조 시 RLS 가 차단. 미들웨어의 단순 redirect 판단엔 충분.
   const {
-    data: { user },
-  } = await supabase.auth.getUser();
+    data: { session },
+  } = await supabase.auth.getSession();
+  const user = session?.user ?? null;
 
   const pathname = request.nextUrl.pathname;
   const isAuthRoute = pathname === "/login" || pathname.startsWith("/auth");
@@ -57,5 +60,8 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|manifest.json|icons|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)"],
+  // 정적 자산 / Next 내부 / API / favicon 은 미들웨어 skip
+  matcher: [
+    "/((?!_next/|api/|favicon\\.ico|manifest\\.json|icons/|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|css|js|woff2?)$).*)",
+  ],
 };

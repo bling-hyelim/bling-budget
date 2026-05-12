@@ -7,6 +7,7 @@
  */
 
 import "server-only";
+import { cache } from "react";
 import { createClient } from "@/lib/supabase/server";
 import * as mock from "@/lib/mockData";
 import { getAccountRole as _getAccountRole, type AccountRole } from "@/lib/accountRole";
@@ -137,7 +138,7 @@ async function getUser() {
 
 /* ---------------- 카테고리 ---------------- */
 
-export async function getCategoryTree(): Promise<CategoryTreeNode[]> {
+export const getCategoryTree = cache(async (): Promise<CategoryTreeNode[]> => {
   if (isConfigured()) {
     const user = await getUser();
     if (user) {
@@ -155,7 +156,7 @@ export async function getCategoryTree(): Promise<CategoryTreeNode[]> {
   }
   // mock fallback
   return assembleTree(mockCategoriesFlat());
-}
+});
 
 function assembleTree(flat: CategoryRow[]): CategoryTreeNode[] {
   const parents = flat.filter((c) => !c.parent_id);
@@ -216,49 +217,33 @@ function mockCategoriesFlat(): CategoryRow[] {
 
 /* ---------------- 계좌 ---------------- */
 
-export async function getAccounts(): Promise<AccountRow[]> {
+/**
+ * 잔액은 DB 의 accounts.current_balance 컬럼에서 읽음 (migration 003).
+ * transactions 의 거래 변화는 트리거로 current_balance 가 자동 갱신됨.
+ */
+export const getAccounts = cache(async (): Promise<AccountRow[]> => {
   if (isConfigured()) {
     const user = await getUser();
     if (user) {
       const supabase = createClient();
-      const [accountsRes, txRes] = await Promise.all([
-        supabase
-          .from("accounts")
-          .select("*")
-          .eq("user_id", user.id)
-          .eq("is_archived", false)
-          .order("sort_order"),
-        supabase
-          .from("transactions")
-          .select("account_id, to_account_id, amount, type")
-          .eq("user_id", user.id),
-      ]);
-      if (!accountsRes.error && accountsRes.data) {
-        // 거래 누적분 계산
-        const delta = new Map<string, number>();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        for (const t of (txRes.data ?? []) as any[]) {
-          const amt = Number(t.amount);
-          if (t.type === "income") {
-            delta.set(t.account_id, (delta.get(t.account_id) ?? 0) + amt);
-          } else if (t.type === "expense") {
-            delta.set(t.account_id, (delta.get(t.account_id) ?? 0) - amt);
-          } else if (t.type === "transfer") {
-            delta.set(t.account_id, (delta.get(t.account_id) ?? 0) - amt);
-            if (t.to_account_id) {
-              delta.set(t.to_account_id, (delta.get(t.to_account_id) ?? 0) + amt);
-            }
-          }
-        }
-        return accountsRes.data.map((a) => {
+      const { data, error } = await supabase
+        .from("accounts")
+        .select("id, name, type, initial_balance, current_balance, color, sort_order")
+        .eq("user_id", user.id)
+        .eq("is_archived", false)
+        .order("sort_order");
+      if (!error && data) {
+        return data.map((a) => {
           const init = Number(a.initial_balance ?? 0);
+          // current_balance 가 아직 백필되지 않은 환경 대비: 없으면 initial_balance 사용
+          const curr = a.current_balance != null ? Number(a.current_balance) : init;
           return {
             id: a.id,
             name: a.name,
             type: a.type,
             role: getAccountRole(a.type),
             initial_balance: init,
-            balance: init + (delta.get(a.id) ?? 0),
+            balance: curr,
             color: a.color ?? null,
             sort_order: a.sort_order ?? 0,
           };
@@ -276,11 +261,13 @@ export async function getAccounts(): Promise<AccountRow[]> {
     color: null,
     sort_order: i,
   }));
-}
+});
 
 /* ---------------- 거래 ---------------- */
 
-export async function getTransactionsByMonth(
+export const getTransactionsByMonth = cache(_getTransactionsByMonth);
+
+async function _getTransactionsByMonth(
   year: number,
   month: number
 ): Promise<TransactionRow[]> {
@@ -425,7 +412,9 @@ export async function getTransaction(id: string): Promise<RawTransaction | null>
 
 /* ---------------- 월별 요약 ---------------- */
 
-export async function getMonthSummary(
+export const getMonthSummary = cache(_getMonthSummary);
+
+async function _getMonthSummary(
   year: number,
   month: number
 ): Promise<MonthSummary> {
@@ -547,7 +536,9 @@ function colorForIncomeSub(name: string): string {
 
 /* ---------------- 자산 요약 ---------------- */
 
-export async function getAssetSummary(): Promise<AssetSummary> {
+export const getAssetSummary = cache(_getAssetSummary);
+
+async function _getAssetSummary(): Promise<AssetSummary> {
   const accounts = await getAccounts();
 
   const checking = accounts.filter((a) => a.role === "checking");
@@ -576,7 +567,9 @@ export async function getAssetSummary(): Promise<AssetSummary> {
 
 /* ---------------- 예산 ---------------- */
 
-export async function getBudgetsByMonth(
+export const getBudgetsByMonth = cache(_getBudgetsByMonth);
+
+async function _getBudgetsByMonth(
   year: number,
   month: number
 ): Promise<BudgetWithProgress[]> {
@@ -644,16 +637,19 @@ export async function getYearlySummary(year: number): Promise<YearlySummary> {
   const accounts = await getAccounts();
   const typeByName = new Map(accounts.map((a) => [a.name, a.type]));
 
-  // 12 개월 모든 거래 모으기
+  // 1년치 거래를 한 번에 조회 (이전: 12회 순차 쿼리)
+  const allTxs = await fetchYearlyTransactions(year);
+
+  // 메모리에서 월별 group by
   const monthly: { month: number; income: number; expense: number }[] = [];
-  const allTxs: TransactionRow[] = [];
   for (let m = 1; m <= 12; m++) {
-    const txs = await getTransactionsByMonth(year, m);
-    allTxs.push(...txs);
+    const monthTxs = allTxs.filter(
+      (t) => Number(t.occurred_on.slice(5, 7)) === m
+    );
     monthly.push({
       month: m,
-      income: sum(txs.filter((t) => t.type === "income").map((t) => t.amount)),
-      expense: sum(txs.filter((t) => t.type === "expense").map((t) => t.amount)),
+      income: sum(monthTxs.filter((t) => t.type === "income").map((t) => t.amount)),
+      expense: sum(monthTxs.filter((t) => t.type === "expense").map((t) => t.amount)),
     });
   }
 
@@ -730,7 +726,9 @@ export interface MonthlyInsights {
   weekendExpense: number;
 }
 
-export async function getMonthlyInsights(
+export const getMonthlyInsights = cache(_getMonthlyInsights);
+
+async function _getMonthlyInsights(
   year: number,
   month: number
 ): Promise<MonthlyInsights> {
@@ -842,7 +840,9 @@ export async function getYearlyExpense(
 }
 
 /** 월별 수입/지출/저축 반환 */
-export async function getYearlyTrend(
+export const getYearlyTrend = cache(_getYearlyTrend);
+
+async function _getYearlyTrend(
   year: number
 ): Promise<{ month: number; income: number; expense: number; savings: number }[]> {
   const result: { month: number; income: number; expense: number; savings: number }[] = [];
@@ -929,6 +929,87 @@ export async function getYearlyTrend(
   }
   return result;
 }
+
+/**
+ * 1년치 거래를 한 번에 fetch — getYearlySummary 의 12회 순차 쿼리를 1회로 대체.
+ */
+const fetchYearlyTransactions = cache(async function (
+  year: number
+): Promise<TransactionRow[]> {
+  if (isConfigured()) {
+    const user = await getUser();
+    if (user) {
+      const supabase = createClient();
+      const start = isoDate(year, 1, 1);
+      const end = isoDate(year + 1, 1, 1);
+      const { data, error } = await supabase
+        .from("transactions")
+        .select(
+          `id, occurred_on, amount, type, memo, is_fixed,
+           category:categories!transactions_category_id_fkey(name),
+           subcategory:categories!transactions_subcategory_id_fkey(name),
+           account:accounts!transactions_account_id_fkey(name),
+           to_account:accounts!transactions_to_account_id_fkey(name, type)`
+        )
+        .eq("user_id", user.id)
+        .gte("occurred_on", start)
+        .lt("occurred_on", end)
+        .order("occurred_on", { ascending: false });
+      if (!error && data) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (data as any[]).map((r) => {
+          const toRole: AccountRole | null = r.to_account?.type
+            ? getAccountRole(r.to_account.type)
+            : null;
+          const type = r.type as TxType;
+          const kind: TxKind =
+            type === "transfer" && toRole === "savings" ? "savings" : type;
+          return {
+            id: r.id,
+            occurred_on: r.occurred_on,
+            amount: Number(r.amount),
+            type,
+            kind,
+            category_name: r.category?.name ?? null,
+            subcategory_name: r.subcategory?.name ?? null,
+            account_name: r.account?.name ?? "",
+            to_account_name: r.to_account?.name ?? null,
+            to_account_role: toRole,
+            memo: r.memo,
+            is_fixed: r.is_fixed,
+          };
+        });
+      }
+    }
+  }
+  // mock fallback
+  const accountTypeByName = new Map<string, string>(
+    mock.MOCK_ACCOUNTS.map((a) => [a.name, a.type])
+  );
+  return mock.MOCK_TRANSACTIONS.filter((t) => {
+    const [y] = t.date.split("-").map(Number);
+    return y === year;
+  }).map((t) => {
+    const toType = t.toAccountName ? accountTypeByName.get(t.toAccountName) : undefined;
+    const toRole: AccountRole | null = toType ? getAccountRole(toType) : null;
+    const kind: TxKind =
+      t.type === "transfer" && toRole === "savings" ? "savings" : t.type;
+    return {
+      id: t.id,
+      occurred_on: t.date,
+      amount: t.amount,
+      type: t.type,
+      kind,
+      category_name: t.category,
+      subcategory_name: t.subcategory ?? null,
+      account_name: t.accountName,
+      to_account_name: t.toAccountName ?? null,
+      to_account_role: toRole,
+      memo: t.memo,
+      is_fixed: !!t.isFixed,
+    };
+  });
+});
 
 /* ---------------- 고정비 (recurring) ---------------- */
 
